@@ -30,7 +30,6 @@ BACKGROUND_WIDTH = IMAGES['background'].get_width()
 
 PLAYER_INDEX_GEN = cycle([0, 1, 2, 1])
 
-
 class GameState:
     def __init__(self):
         self.score = self.playerIndex = self.loopIter = 0
@@ -62,7 +61,7 @@ class GameState:
     def frame_step(self, input_actions):
         pygame.event.pump()
 
-        reward = 0.1
+        reward = 0
         terminal = False
 
         if sum(input_actions) != 1:
@@ -145,6 +144,10 @@ class GameState:
         FPSCLOCK.tick(FPS)
         #print self.upperPipes[0]['y'] + PIPE_HEIGHT - int(BASEY * 0.2)
         return image_data, reward, terminal
+
+    def first_state(self):
+
+        return self.frame_step(np.array([1, 0, 0]))
 
 def getRandomPipe():
     """returns a randomly generated pipe"""
