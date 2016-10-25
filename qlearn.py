@@ -9,7 +9,6 @@ from skimage.color import rgb2gray
 from skimage.transform import resize
 from skimage.exposure import rescale_intensity
 
-sys.path.append('game/')
 import wrapped_flappy_bird as game
 
 from keras.initializations import normal, identity
@@ -47,7 +46,6 @@ class FlappyAI(object):
     def __init__(self, model_constructor):
 
         self.game = 'bird' # the name of the game being played for log files
-        self.config = 'nothreshold'
         self.actions = 2 # number of valid actions
         self.gamma = 0.99 # decay rate of past observations
         self.observations = 3200. # timesteps to observe before training
@@ -64,7 +62,7 @@ class FlappyAI(object):
         # store the previous observations in replay memory
         self.D = deque(maxlen=self.replay_mem)
 
-        self.model = model_constructor(self.img_shape)
+        self.model = model_constructor((4,) + self.img_shape)
 
     def _remorph_targets(self, targets, Q, rewards, actions, ends):
 
@@ -78,15 +76,20 @@ class FlappyAI(object):
         # Reduce our eps as we get more sure
         eps = max(self.final_eps, eps - (self.init_eps - self.final_eps) / self.explore)
 
+        # state_t, action_index, r_t, state_t1, end
+
         # Sample from our replay memory
-        minibatch = np.array(sample(self.D, BATCH))
+        minibatch = sample(self.D, BATCH)
+        # Put each specific part of the replay data together
+        minibatch = zip(*minibatch)
 
-        img_batch = minibatch[:, 0]
+        img_batch = np.stack(minibatch[0], axis=0)
+        img_batch = img_batch.reshape(BATCH, 4, self.img_rows, self.img_cols)
 
-        actions = minibatch[:, 1]
-        rewards = minibatch[:, 2]
-        nxt_state = minibatch[:, 3]
-        ends = minibatch[:, 4]
+        actions = np.array(minibatch[1])
+        rewards = np.array(minibatch[2])
+        nxt_state = np.stack(minibatch[3], axis=0).reshape(BATCH, 4, self.img_rows, self.img_cols)
+        ends = np.array(minibatch[4])
 
         targets = self.model.predict(img_batch)
         Q_sa = self.model.predict(nxt_state)
@@ -154,7 +157,7 @@ class FlappyAI(object):
             # Run our action
             img_t1, r_t, end = game_state.frame_step(action_t)
 
-            img_t1 = preprocess(img_t1, self.img_shape)
+            img_t1 = preprocess(img_t1, self.img_shape).reshape((1, 1,) + self.img_shape)
             state_t1 = np.append(img_t1, state_t[:, :3, :, :], axis=1)
 
             # Store the state in our replay memory
@@ -164,15 +167,16 @@ class FlappyAI(object):
             if t > observe_turns:
                 mode = 'train'
                 eps, loss, q_max = self._train_batch(eps, loss)
-
+                if t % 100 == 0:
+                    # save progress every 100 iterations
+                    self.model.save_weights('weights_%s.h5' % t, overwrite=True)
 
             state_t = state_t1
             t += 1
 
-            # save progress every 100 iterations
-            if t % 100 == 0:
+            if mode == 'train' or (mode == 'observe' and t % 100 == 0):
                 self.logger(t, mode, eps, action_index, r_t, q_max, loss)
-                self.model.save_weights('weights_%s.h5' % t, overwrite=True)
+
 
 if __name__ == '__main__':
     bot = FlappyAI(baselineConv)
