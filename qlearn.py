@@ -13,22 +13,27 @@ import wrapped_flappy_bird as game
 
 from keras.initializations import normal, identity
 from keras.models import Sequential
-from keras.layers import Convolution2D, Activation, Flatten, Dense
+from keras.layers import Convolution2D, Activation, Flatten, Dense, Dropout, MaxPooling2D
 
-BATCH = 32 # size of minibatch
+BATCH = 32  # size of minibatch
+
 
 def baselineConv(input_shape):
     model = Sequential()
     model.add(Convolution2D(32, 8, 8, init=lambda shape, name: normal(shape, scale=0.01, name=name), subsample=(4, 4),
                             input_shape=input_shape))
     model.add(Activation('relu'))
+    model.add(MaxPooling2D())
     model.add(Convolution2D(64, 4, 4, init=lambda shape, name: normal(shape, scale=0.01, name=name), subsample=(2, 2)))
     model.add(Activation('relu'))
-    model.add(Convolution2D(128, 3, 3, init=lambda shape, name: normal(shape, scale=0.01, name=name)))
+    model.add(Convolution2D(64, 3, 3, init=lambda shape, name: normal(shape, scale=0.01, name=name)))
     model.add(Activation('relu'))
     model.add(Flatten())
-    model.add(Dense(512, init=lambda shape, name: normal(shape, scale=0.01, name=name)))
+    model.add(Dense(256, init=lambda shape, name: normal(shape, scale=0.01, name=name)))
     model.add(Activation('relu'))
+    model.add(Dense(256, init=lambda shape, name: normal(shape, scale=0.01, name=name)))
+    model.add(Activation('relu'))
+    # model.add(Dropout(.5))
     model.add(Dense(2, init=lambda shape, name: normal(shape, scale=0.01, name=name)))
 
     model.compile(loss='mse', optimizer='rmsprop')
@@ -38,69 +43,72 @@ def baselineConv(input_shape):
 def preprocess(img, shape):
     img = rgb2gray(img)
     img = resize(img, shape)
-    img = np.array(rescale_intensity(img, out_range=(0, 255))).astype(float)
+    img = rescale_intensity(img, out_range=(0, 255)).astype(float)
     return img / 255.0
 
+
 class FlappyAI(object):
+    def __init__(self, model_constructor, mode='observe'):
 
-    def __init__(self, model_constructor):
-
-        self.game = 'bird' # the name of the game being played for log files
-        self.actions = 2 # number of valid actions
-        self.gamma = 0.99 # decay rate of past observations
-        self.observations = 3200. # timesteps to observe before training
-        self.explore = 3000000. # frames over which to anneal epsilon
-        self.final_eps = 0.0001 # final value of epsilon
-        self.init_eps = 0.1 # starting value of epsilon
-        self.replay_mem = 50000 # number of previous transitions to remember
+        self.game = 'bird'  # the name of the game being played for log files
+        self.actions = 2  # number of valid actions
+        self.gamma = 0.99  # decay rate of past observations
+        self.observations = 10000  # timesteps to observe before training
+        self.explore = 3000000.  # frames over which to anneal epsilon
+        self.final_eps = 0.0001  # final value of epsilon
+        self.init_eps = 0.1  # starting value of epsilon
+        self.eps = self.init_eps
+        self.replay_mem = 50000  # number of previous transitions to remember
         self.frames_per_action = 1
+        self.mode = mode
 
-        self.img_rows , self.img_cols = 80, 80
+        self.img_rows, self.img_cols = 80, 80
         self.img_shape = (self.img_rows, self.img_cols)
-        self.img_channels = 4 #We stack 4 frames
+        self.img_channels = 4  # We stack 4 frames
 
         # store the previous observations in replay memory
         self.D = deque(maxlen=self.replay_mem)
 
         self.model = model_constructor((4,) + self.img_shape)
 
-    def _remorph_targets(self, targets, Q, rewards, actions, ends):
+    def _q_prime(self, states, action_inds, rewards, nxt_states, terminals):
 
-        not_ends = ~ends
-        Q_prime = np.multiply(not_ends, np.max(Q, axis=1))
-        targets[:, actions] = rewards + self.gamma * Q_prime
-        return targets
+        # We want this to be False when terminating so we don't add on the Q value
+        not_terminals = ~terminals
 
-    def _train_batch(self, eps, loss):
+        q_t = self.model.predict(states)
+        q_prime = self.model.predict(nxt_states)
 
-        # Reduce our eps as we get more sure
-        eps = max(self.final_eps, eps - (self.init_eps - self.final_eps) / self.explore)
+        q_t[np.arange(states.shape[0]), action_inds] = rewards + self.gamma * np.max(q_prime, axis=1) * not_terminals
 
-        # state_t, action_index, r_t, state_t1, end
+        return q_t
 
-        # Sample from our replay memory
-        minibatch = sample(self.D, BATCH)
-        # Put each specific part of the replay data together
-        minibatch = zip(*minibatch)
+    def _batch(self, minibatch):
 
-        img_batch = np.stack(minibatch[0], axis=0)
-        img_batch = img_batch.reshape(BATCH, 4, self.img_rows, self.img_cols)
+        states, action_inds, rewards, nxt_states, terminals = zip(*minibatch)
 
-        actions = np.array(minibatch[1])
-        rewards = np.array(minibatch[2])
-        nxt_state = np.stack(minibatch[3], axis=0).reshape(BATCH, 4, self.img_rows, self.img_cols)
-        ends = np.array(minibatch[4])
+        states = np.stack(states, axis=0).reshape(len(states), -1, self.img_rows, self.img_cols)
+        action_inds = np.array(action_inds)
+        rewards = np.array(rewards)
+        nxt_states = np.stack(nxt_states, axis=0).reshape(len(nxt_states), -1, self.img_rows, self.img_cols)
+        terminals = np.array(terminals)
 
-        targets = self.model.predict(img_batch)
-        Q_sa = self.model.predict(nxt_state)
+        # Calculate the Q_prime values
+        q_t = self._q_prime(states, action_inds, rewards, nxt_states, terminals)
 
-        targets = self._remorph_targets(targets, Q_sa, rewards, actions, ends)
+        return states, q_t
 
-        loss += self.model.train_on_batch(img_batch, targets)
+    def _batch_gen(self):
 
-        Q_max = np.max(Q_sa)
+        while True:
+            shuffled = np.array(sample(self.D, len(self.D)))
+            replay_inds = np.arange(len(shuffled))
+            np.random.shuffle(replay_inds)
+            for i in xrange(0, len(replay_inds), BATCH):
+                minibatch_inds = replay_inds[i:min(i+32, len(replay_inds))]
+                minibatch = shuffled[minibatch_inds]
+                yield self._batch(minibatch)
 
-        return eps, loss, Q_max
 
     @staticmethod
     def logger(timestep, mode, eps, action, reward, max_q, loss):
@@ -110,99 +118,79 @@ class FlappyAI(object):
         msg = msg.format(timestep, mode, eps, action, reward, max_q, loss)
         print(msg)
 
-    def fit(self, run=False):
-
-        # open up a game state to communicate with emulator
-        game_state = game.GameState()
-
-        # Get First State
-        img_t, r_0, end = game_state.first_state()
-
-        # Do some preprocessing
-        img_t = preprocess(img_t, self.img_shape)
-
-        # Build the first state
-        state_t = np.stack((img_t, img_t, img_t, img_t), axis=0)
-
-        # Reshape for Keras
-        state_t = state_t.reshape((1,) + state_t.shape)
-
-        if run:
-            mode = 'run'
-            observe_turns = float('inf') # We want to not train at all
-            eps = self.final_eps
-            self.model.load_weights('model.h5')
-            self.model.compile(loss='mse', optimizer='rmsprop')
-        else:
-            mode = 'observe'
-            observe_turns = self.observations
-            eps = self.init_eps
+    def play(self, game_state, state_t):
 
         t = 0
         while True:
-            q_max = 'n/a'
-            loss = 0
             action_index = 0
+            q_max = 0
             action_t = np.zeros((self.actions,))
             if not t % self.frames_per_action:
                 # Pick a random action if below epsilon
-                if random() <= eps:
+                if random() <= self.eps:
                     action_index = randrange(self.actions)
-                    action_t[action_index] = 1
-
+                    q_max = 'RANDOM ACTION'
                 else:
-                    action_index = np.argmax(self.model.predict(state_t))
-                    action_t[action_index] = 1
+                    q = self.model.predict(state_t)
+                    action_index = np.argmax(q)
+                    q_max = np.max(q)
 
             # Run our action
+            action_t[action_index] = 1
             img_t1, r_t, end = game_state.frame_step(action_t)
 
             img_t1 = preprocess(img_t1, self.img_shape).reshape((1, 1,) + self.img_shape)
-            state_t1 = np.append(img_t1, state_t[:, :3, :, :], axis=1)
+            state_t1 = np.append(img_t1, state_t[:, :3, :, :], axis=1)  # (new image, old, older, oldest)
 
             # Store the state in our replay memory
             self.D.append((state_t, action_index, r_t, state_t1, end))
 
-            # Train once we've observed long enough
-            if t > observe_turns:
-                mode = 'train'
-                eps, loss, q_max = self._train_batch(eps, loss)
+            if self.mode == 'train':
+                # Reduce our eps as we get more sure
+                self.eps = max(self.final_eps, self.eps - (self.init_eps - self.final_eps) / self.explore)
+                minibatch = sample(self.D, BATCH)
+                states, q_t = self._batch(minibatch)
+                loss = self.model.train_on_batch(states, q_t)
+                self.logger(t, self.mode, self.eps, action_index, r_t, q_max, loss)
                 if t % 100 == 0:
                     # save progress every 100 iterations
                     self.model.save_weights('weights_%s.h5' % t, overwrite=True)
 
+            if t == self.observations + 1:
+                print('-----------FINISHED OBSERVING----------')
+                self.mode = 'train'
+                # Train over all of our observations
+                self.model.fit_generator(self._batch_gen(), samples_per_epoch=len(self.D), nb_epoch=1, verbose=1)
+                print('-----------FINISHED TRAINING ON OBSERVATIONS-------------')
+
+            if self.mode == 'observe' and not t % 100:
+                print('--------OBSERVATION # %s---------------' % t)
+
             state_t = state_t1
             t += 1
 
-            if mode == 'train' or (mode == 'observe' and t % 100 == 0):
-                self.logger(t, mode, eps, action_index, r_t, q_max, loss)
+    def fit(self):
+
+        # open up a game state to communicate with emulator
+        game_state = game.GameState()
+        # Get First State
+        img_t, r_0, end = game_state.first_state()
+        # Do some preprocessing
+        img_t = preprocess(img_t, self.img_shape)
+        # Build the first state
+        state_t = np.stack((img_t, img_t, img_t, img_t), axis=0)  # (4, 80, 80)
+        # Reshape for Keras
+        state_t = state_t.reshape((1,) + state_t.shape)  # (1, 4, 80, 80)
+
+        # Set it up for running if we need to
+        if self.mode == 'run':
+            self.eps = self.final_eps
+            self.model.load_weights('model.h5')
+            self.model.compile(loss='mse', optimizer='rmsprop')
+
+        self.play(game_state, state_t)
 
 
 if __name__ == '__main__':
     bot = FlappyAI(baselineConv)
     bot.fit()
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

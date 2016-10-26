@@ -135,7 +135,7 @@ class GameState:
 
         SCREEN.blit(IMAGES['base'], (self.basex, BASEY))
         # print score so player overlaps the score
-        # showScore(self.score)
+        showScore(self.score)
         SCREEN.blit(IMAGES['player'][self.playerIndex],
                     (self.playerx, self.playery))
 
@@ -147,7 +147,7 @@ class GameState:
 
     def first_state(self):
 
-        return self.frame_step(np.array([1, 0, 0]))
+        return self.frame_step(np.array([1, 0]))
 
 def getRandomPipe():
     """returns a randomly generated pipe"""
